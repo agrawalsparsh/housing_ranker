@@ -6,6 +6,7 @@ import random
 import json
 import pickle
 import os
+import hashlib
 from datetime import datetime
 import folium
 from streamlit_folium import st_folium
@@ -43,7 +44,11 @@ class ApartmentEloRanker:
             self.apartments_df = self.apartments_df[self.apartments_df["Link"] != "nan"]
             self.apartments_df = self.apartments_df[self.apartments_df["Link"] != ""]
             self.apartments_df = self.apartments_df[~self.apartments_df["Link"].isna()]
-            # Initialize ELO scores for new apartments
+            
+            # Load saved ELO data now that we have apartment data
+            self.load_saved_data()
+            
+            # Initialize ELO scores for new apartments (preserving existing ones)
             for idx, row in self.apartments_df.iterrows():
                 apt_id = self._get_apartment_id(row)
                 if apt_id not in self.elo_scores:
@@ -60,7 +65,7 @@ class ApartmentEloRanker:
     
     def _get_apartment_id(self, row):
         """Generate unique ID for apartment based on link"""
-        return hash(row['Link'])
+        return hashlib.md5(row['Link'].encode()).hexdigest()
     
     def calculate_elo_change(self, winner_elo, loser_elo):
         """Calculate ELO rating changes"""
@@ -112,11 +117,20 @@ class ApartmentEloRanker:
             'elo_scores': self.elo_scores,
             'match_history': self.match_history
         }
-        with open(ELO_DATA_FILE, 'wb') as f:
-            pickle.dump(data, f)
-        
-        # Also export rankings to CSV
-        self.export_rankings_to_csv()
+        try:
+            with open(ELO_DATA_FILE, 'wb') as f:
+                pickle.dump(data, f)
+            print(f"Successfully saved {len(self.elo_scores)} ELO scores and {len(self.match_history)} matches to {ELO_DATA_FILE}")
+            
+            # Also export rankings to CSV
+            self.export_rankings_to_csv()
+        except Exception as e:
+            print(f"Error saving data: {str(e)}")
+            # Only show error if in Streamlit context
+            try:
+                st.error(f"Error saving data: {str(e)}")
+            except:
+                pass
     
     def load_saved_data(self):
         """Load saved ELO scores and match history"""
@@ -126,12 +140,24 @@ class ApartmentEloRanker:
                     data = pickle.load(f)
                     self.elo_scores = data.get('elo_scores', {})
                     self.match_history = data.get('match_history', [])
+                    
+                # Debug info (only in non-Streamlit context for now)
+                print(f"Successfully loaded {len(self.elo_scores)} ELO scores and {len(self.match_history)} matches from {ELO_DATA_FILE}")
+                    
             except Exception as e:
                 # Only show warning if in Streamlit context
                 try:
                     st.warning(f"Could not load saved data: {str(e)}")
                 except:
                     print(f"Could not load saved data: {str(e)}")
+                # Reset to empty if loading fails
+                self.elo_scores = {}
+                self.match_history = []
+        else:
+            # No saved data file exists yet
+            self.elo_scores = {}
+            self.match_history = []
+            print(f"No saved data file found at {ELO_DATA_FILE}, starting fresh")
     
     def get_rankings(self):
         """Get current rankings sorted by ELO"""
@@ -411,7 +437,6 @@ def main():
     # Initialize ranker
     if 'ranker' not in st.session_state:
         st.session_state.ranker = ApartmentEloRanker()
-        st.session_state.ranker.load_saved_data()
         
     ranker = st.session_state.ranker
     
@@ -440,6 +465,19 @@ def main():
     
     st.sidebar.write(f"**Pickle file:** {ELO_DATA_FILE}")
     st.sidebar.write(f"**CSV file:** {ELO_RANKINGS_CSV}")
+    
+    # Debug info
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("🔍 Debug Info")
+    st.sidebar.write(f"**Total apartments:** {len(ranker.apartments_df) if ranker.apartments_df is not None else 0}")
+    st.sidebar.write(f"**ELO scores loaded:** {len(ranker.elo_scores)}")
+    st.sidebar.write(f"**Matches played:** {len(ranker.match_history)}")
+    
+    if os.path.exists(ELO_DATA_FILE):
+        mod_time = datetime.fromtimestamp(os.path.getmtime(ELO_DATA_FILE))
+        st.sidebar.write(f"**Last saved:** {mod_time.strftime('%Y-%m-%d %H:%M:%S')}")
+    else:
+        st.sidebar.write("**No saved data found**")
     
     if os.path.exists(ELO_RANKINGS_CSV):
         # Get file modification time
