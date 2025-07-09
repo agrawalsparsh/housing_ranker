@@ -111,6 +111,101 @@ class ApartmentEloRanker:
         indices = random.sample(range(len(self.apartments_df)), 2)
         return indices[0], indices[1]
     
+    def get_active_learning_pair(self):
+        """Get two apartments for comparison using active learning principles"""
+        if len(self.apartments_df) < 2:
+            return None, None
+        
+        # Get current ELO scores for all apartments
+        apartment_elos = []
+        for idx, row in self.apartments_df.iterrows():
+            apt_id = self._get_apartment_id(row)
+            elo = self.elo_scores.get(apt_id, INITIAL_ELO)
+            apartment_elos.append((idx, elo))
+        
+        # Sort by ELO score
+        apartment_elos.sort(key=lambda x: x[1], reverse=True)
+        
+        # Find the best pair with similar ELO scores
+        best_pair = None
+        min_elo_diff = float('inf')
+        
+        for i in range(len(apartment_elos)):
+            for j in range(i + 1, len(apartment_elos)):
+                idx1, elo1 = apartment_elos[i]
+                idx2, elo2 = apartment_elos[j]
+                
+                # Calculate ELO difference
+                elo_diff = abs(elo1 - elo2)
+                
+                # Check if this pair was recently matched
+                if self._was_recently_matched(idx1, idx2):
+                    continue
+                
+                # Prioritize smaller ELO differences (more uncertain outcomes)
+                if elo_diff < min_elo_diff:
+                    min_elo_diff = elo_diff
+                    best_pair = (idx1, idx2)
+        
+        # If no good pair found (all were recently matched), fall back to random
+        if best_pair is None:
+            return self.get_random_pair()
+        
+        return best_pair
+    
+    def _was_recently_matched(self, idx1, idx2, recent_matches=5):
+        """Check if two apartments were matched in the last N matches"""
+        if len(self.match_history) < recent_matches:
+            matches_to_check = self.match_history
+        else:
+            matches_to_check = self.match_history[-recent_matches:]
+        
+        for match in matches_to_check:
+            if ((match['winner_idx'] == idx1 and match['loser_idx'] == idx2) or
+                (match['winner_idx'] == idx2 and match['loser_idx'] == idx1)):
+                return True
+        return False
+    
+    def get_balanced_pair(self):
+        """Get two apartments ensuring balanced coverage"""
+        if len(self.apartments_df) < 2:
+            return None, None
+        
+        # Count how many times each apartment has been in matches
+        match_counts = {}
+        for idx in range(len(self.apartments_df)):
+            match_counts[idx] = 0
+        
+        for match in self.match_history:
+            match_counts[match['winner_idx']] += 1
+            match_counts[match['loser_idx']] += 1
+        
+        # Sort apartments by match count (ascending)
+        sorted_apartments = sorted(match_counts.items(), key=lambda x: x[1])
+        
+        # Try to match the least-matched apartments
+        for i in range(len(sorted_apartments)):
+            for j in range(i + 1, len(sorted_apartments)):
+                idx1, count1 = sorted_apartments[i]
+                idx2, count2 = sorted_apartments[j]
+                
+                # If both have low match counts, use them
+                if count1 <= 2 and count2 <= 2:
+                    if not self._was_recently_matched(idx1, idx2):
+                        return idx1, idx2
+        
+        # Fall back to active learning if no low-match pairs found
+        return self.get_active_learning_pair()
+    
+    def get_smart_pair(self, strategy="active_learning"):
+        """Get a smart pair using the specified strategy"""
+        if strategy == "active_learning":
+            return self.get_active_learning_pair()
+        elif strategy == "balanced":
+            return self.get_balanced_pair()
+        else:
+            return self.get_random_pair()
+    
     def save_data(self):
         """Save ELO scores and match history"""
         data = {
@@ -454,6 +549,24 @@ def main():
         ["Compare Apartments", "View Rankings", "Match History"]
     )
     
+    # Matching Strategy Selection
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("🎯 Matching Strategy")
+    matching_strategy = st.sidebar.selectbox(
+        "Choose matching strategy:",
+        ["active_learning", "balanced", "random"],
+        index=0,
+        help="Active Learning: Match similar ELO apartments for maximum information. Balanced: Ensure all apartments get compared. Random: Traditional random matching."
+    )
+    
+    # Show strategy info
+    if matching_strategy == "active_learning":
+        st.sidebar.info("🧠 **Active Learning**: Matches apartments with similar ELO scores for maximum information gain")
+    elif matching_strategy == "balanced":
+        st.sidebar.info("⚖️ **Balanced**: Ensures all apartments get compared roughly equally")
+    else:
+        st.sidebar.info("🎲 **Random**: Traditional random matching")
+    
     # CSV Export button
     st.sidebar.markdown("---")
     st.sidebar.subheader("📊 Data Export")
@@ -473,6 +586,12 @@ def main():
     st.sidebar.write(f"**ELO scores loaded:** {len(ranker.elo_scores)}")
     st.sidebar.write(f"**Matches played:** {len(ranker.match_history)}")
     
+    # Show match statistics
+    if ranker.match_history:
+        recent_matches = ranker.match_history[-10:]
+        avg_elo_diff = sum(abs(match['winner_elo_before'] - match['loser_elo_before']) for match in recent_matches) / len(recent_matches)
+        st.sidebar.write(f"**Avg ELO diff (last 10):** {avg_elo_diff:.0f}")
+    
     if os.path.exists(ELO_DATA_FILE):
         mod_time = datetime.fromtimestamp(os.path.getmtime(ELO_DATA_FILE))
         st.sidebar.write(f"**Last saved:** {mod_time.strftime('%Y-%m-%d %H:%M:%S')}")
@@ -489,29 +608,53 @@ def main():
     if page == "Compare Apartments":
         st.header("🥊 Compare Two Apartments")
         
+        # Add strategy explanation
+        with st.expander("ℹ️ How Matching Strategies Work", expanded=False):
+            st.markdown("""
+            **🧠 Active Learning** (Recommended):
+            - Matches apartments with similar ELO scores
+            - Maximizes information gain from each comparison
+            - Avoids predictable matchups (very high vs very low ELO)
+            
+            **⚖️ Balanced**:
+            - Ensures all apartments get compared roughly equally
+            - Good for comprehensive coverage
+            - Prioritizes apartments that haven't been compared much
+            
+            **🎲 Random**:
+            - Traditional random matching
+            - No optimization, purely random selection
+            - May waste comparisons on predictable matchups
+            """)
+        
         if len(ranker.apartments_df) < 2:
             st.error("Need at least 2 apartments to compare!")
             return
         
         # Get random pair
         if 'current_pair' not in st.session_state:
-            st.session_state.current_pair = ranker.get_random_pair()
+            st.session_state.current_pair = ranker.get_smart_pair(matching_strategy)
         
         idx1, idx2 = st.session_state.current_pair
         apt1 = ranker.apartments_df.iloc[idx1]
         apt2 = ranker.apartments_df.iloc[idx2]
+        
+        # Show match quality info
+        current_elo_1 = ranker.elo_scores.get(ranker._get_apartment_id(apt1), INITIAL_ELO)
+        current_elo_2 = ranker.elo_scores.get(ranker._get_apartment_id(apt2), INITIAL_ELO)
+        elo_diff = abs(current_elo_1 - current_elo_2)
+        
+        st.info(f"🎯 **Match Quality**: ELO difference of {elo_diff:.0f} points using {matching_strategy.replace('_', ' ').title()} strategy")
         
         # Display apartments side by side
         col1, col2 = st.columns(2)
         
         with col1:
             display_apartment(apt1, "🏠 Apartment A")
-            current_elo_1 = ranker.elo_scores.get(ranker._get_apartment_id(apt1), INITIAL_ELO)
             st.write(f"**Current ELO:** {current_elo_1:.0f}")
             
         with col2:
             display_apartment(apt2, "🏠 Apartment B")
-            current_elo_2 = ranker.elo_scores.get(ranker._get_apartment_id(apt2), INITIAL_ELO)
             st.write(f"**Current ELO:** {current_elo_2:.0f}")
         
         # Voting buttons
@@ -522,20 +665,20 @@ def main():
             if st.button("🏠 Choose Apartment A", use_container_width=True):
                 ranker.record_match(idx1, idx2)
                 st.success("Vote recorded! Apartment A wins!")
-                st.session_state.current_pair = ranker.get_random_pair()
+                st.session_state.current_pair = ranker.get_smart_pair(matching_strategy)
                 time.sleep(1)
                 st.rerun()
         
         with col2:
             if st.button("🔄 Skip This Comparison", use_container_width=True):
-                st.session_state.current_pair = ranker.get_random_pair()
+                st.session_state.current_pair = ranker.get_smart_pair(matching_strategy)
                 st.rerun()
                 
         with col3:
             if st.button("🏠 Choose Apartment B", use_container_width=True):
                 ranker.record_match(idx2, idx1)
                 st.success("Vote recorded! Apartment B wins!")
-                st.session_state.current_pair = ranker.get_random_pair()
+                st.session_state.current_pair = ranker.get_smart_pair(matching_strategy)
                 time.sleep(1)
                 st.rerun()
     
