@@ -129,6 +129,8 @@ class ApartmentEloRanker:
         # Find the best pair with similar ELO scores
         best_pair = None
         min_elo_diff = float('inf')
+
+        min_elo = min(apartment_elos, key=lambda x: x[1])[1]
         
         for i in range(len(apartment_elos)):
             for j in range(i + 1, len(apartment_elos)):
@@ -137,6 +139,10 @@ class ApartmentEloRanker:
                 
                 # Calculate ELO difference
                 elo_diff = abs(elo1 - elo2)
+
+                #Adjust elo_diff to scale with the ELO of the apartment as well
+
+                elo_diff = elo_diff * 1/(max(1, max(elo1, elo2) - min_elo))
                 
                 # Check if this pair was recently matched
                 if self._was_recently_matched(idx1, idx2):
